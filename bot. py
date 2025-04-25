@@ -1,0 +1,116 @@
+from telegram.ext import Updater, MessageHandler, Filters, CommandHandler, ChatMemberHandler
+from telegram import Update, ChatMember
+import time
+import sqlite3
+from datetime import datetime, timedelta
+
+# ডাটাবেস সেটআপ
+def setup_database():
+    conn = sqlite3.connect('group_activity.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS user_activity
+                 (user_id INTEGER, chat_id INTEGER, last_media_time REAL, username TEXT)''')
+    conn.commit()
+    conn.close()
+
+# সদস্যের শেষ মিডিয়া পোস্টের সময় আপডেট
+def update_user_activity(user_id, chat_id, username):
+    conn = sqlite3.connect('group_activity.db')
+    c = conn.cursor()
+    current_time = time.time()
+    c.execute("INSERT OR REPLACE INTO user_activity (user_id, chat_id, last_media_time, username) VALUES (?, ?, ?, ?)",
+              (user_id, chat_id, current_time, username))
+    conn.commit()
+    conn.close()
+
+# নিষ্ক্রিয় সদস্যদের চেক এবং কিক
+def check_inactive_users(context):
+    conn = sqlite3.connect('group_activity.db')
+    c = conn.cursor()
+    current_time = time.time()
+    threshold = current_time - (48 * 3600)  # ৪৮ ঘণ্টা
+
+    c.execute("SELECT user_id, chat_id, username FROM user_activity WHERE last_media_time < ?", (threshold,))
+    inactive_users = c.fetchall()
+
+    for user_id, chat_id, username in inactive_users:
+        try:
+            context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            context.bot.send_message(chat_id=chat_id, text=f"@{username} ৪৮ ঘণ্টার মধ্যে কোনো মিডিয়া পোস্ট করেনি, তাই গ্রুপ থেকে সরানো হয়েছে।")
+            c.execute("DELETE FROM user_activity WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+        except Exception as e:
+            print(f"ব্যবহারকারী {user_id} কিক করতে সমস্যা: {e}")
+
+    conn.commit()
+    conn.close()
+
+# গ্রুপে বট যুক্ত হলে মেসেজ
+def bot_added_to_group(update: Update, context):
+    if update.my_chat_member and update.my_chat_member.new_chat_member.status in [ChatMember.ADMINISTRATOR, ChatMember.MEMBER]:
+        chat_id = update.my_chat_member.chat.id
+        context.bot.send_message(
+            chat_id=chat_id,
+            text="আমি একটি বট, Dahir আমাকে তৈরি করেছে। তোমরা যদি ৪৮ ঘণ্টার ভিতরে গ্রুপের ভেতর কোন কিছু পোস্ট না কর তাহলে আমি তোমাদের গ্রুপ থেকে বের করে দিব।"
+        )
+
+# নতুন মেম্বার যুক্ত হলে মেসেজ
+def new_member(update: Update, context):
+    for member in update.message.new_chat_members:
+        if not member.is_bot:  # বট নয়, শুধুমাত্র মানুষের জন্য
+            username = member.username or member.first_name
+            update.message.reply_text(
+                f"@{username}, আমি একটি বট, Dahir আমাকে তৈরি করেছে। তুমি যদি ৪৮ ঘণ্টার ভিতরে গ্রুপের ভেতর কোন কিছু পোস্ট না কর তাহলে আমি তোমাকে গ্রুপ থেকে বের করে দিব।"
+            )
+            update_user_activity(member.id, update.message.chat_id, username)
+
+# মিডিয়া মেসেজ হ্যান্ডল করা
+def handle_media(update: Update, context):
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+    username = update.message.from_user.username or update.message.from_user.first_name
+
+    if update.message.photo or update.message.video or update.message.audio or update.message.document:
+        update_user_activity(user_id, chat_id, username)
+
+# ফরোয়ার্ড করা মিডিয়া হ্যান্ডল করা
+def handle_forwarded_media(update: Update, context):
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+    username = update.message.from_user.username or update.message.from_user.first_name
+
+    if update.message.forward_date and (update.message.photo or update.message.video or update.message.audio or update.message.document):
+        update_user_activity(user_id, chat_id, username)
+
+# /start কমান্ড
+def start(update: Update, context):
+    update.message.reply_text("আমি একটি বট, Dahir আমাকে তৈরি করেছে। আমি গ্রুপে ৪৮ ঘণ্টার মধ্যে মিডিয়া পোস্ট না করা সদস্যদের সরিয়ে দেব। আমাকে গ্রুপে অ্যাডমিন করুন।")
+
+# এরর হ্যান্ডলিং
+def error_handler(update: Update, context):
+    print(f"এরর: {context.error}")
+
+# প্রধান ফাংশন
+def main():
+    setup_database()
+
+    # বট টোকেন
+    updater = Updater("8038057156:AAG2QzcnTosT72VUpPWUIofCmX-25CNeQyc", use_context=True)
+    dp = updater.dispatcher
+
+    # হ্যান্ডলার
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(ChatMemberHandler(bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
+    dp.add_handler(MessageHandler(Filters.status_update.new_chat_members, new_member))
+    dp.add_handler(MessageHandler(Filters.photo | Filters.video | Filters.audio | Filters.document, handle_media))
+    dp.add_handler(MessageHandler(Filters.forwarded & (Filters.photo | Filters.video | Filters.audio | Filters.document), handle_forwarded_media))
+    dp.add_error_handler(error_handler)
+
+    # প্রতি ঘণ্টায় নিষ্ক্রিয় সদস্য চেক
+    updater.job_queue.run_repeating(check_inactive_users, interval=3600, first=10)
+
+    # বট চালু
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
